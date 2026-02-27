@@ -1,0 +1,533 @@
+import React, { useState, useEffect } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
+import { 
+  extractSkills, 
+  generateChecklist, 
+  generate7DayPlan, 
+  generateQuestions, 
+  calculateReadinessScore,
+  getCompanyIntel
+} from '../utils/analysis'
+import { saveAnalysis, updateAnalysis } from '../utils/storage'
+import { AnalysisEntry } from '../types'
+import { Copy, Download, ChevronDown, ChevronUp } from 'lucide-react'
+
+export default function Results() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const [analysisData, setAnalysisData] = useState<AnalysisEntry | null>(null)
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
+    skills: true,
+    checklist: false,
+    plan: false,
+    questions: false,
+    companyIntel: false
+  })
+
+  // Get data from location state or localStorage
+  useEffect(() => {
+    const state = location.state as { 
+      company: string; 
+      role: string; 
+      jdText: string; 
+      id?: string 
+    }
+    
+    if (state?.jdText) {
+      // New analysis from Home page
+      const skills = extractSkills(state.jdText)
+      const baseScore = calculateReadinessScore(skills, state.company, state.role, state.jdText.length)
+      const checklist = generateChecklist(skills)
+      const plan7Days = generate7DayPlan(skills)
+      const questions = generateQuestions(skills)
+      
+      const newEntry: AnalysisEntry = {
+        id: state.id || Date.now().toString(),
+        createdAt: new Date().toISOString(),
+        company: state.company,
+        role: state.role,
+        jdText: state.jdText,
+        extractedSkills: skills,
+        roundMapping: [], // Will be generated based on company + skills
+        checklist,
+        plan7Days,
+        questions,
+        baseScore,
+        skillConfidenceMap: {},
+        finalScore: baseScore,
+        updatedAt: new Date().toISOString()
+      }
+
+      // Add company intel if company provided
+      if (state.company.trim()) {
+        const companyIntel = getCompanyIntel(state.company)
+        newEntry.companyIntel = {
+          name: companyIntel.name,
+          industry: companyIntel.industry,
+          size: companyIntel.size as 'Startup' | 'Mid-size' | 'Enterprise',
+          hiringFocus: companyIntel.hiringFocus
+        }
+      }
+
+      setAnalysisData(newEntry)
+      
+      // Save to localStorage if it's a new analysis
+      if (!state.id) {
+        saveAnalysis(newEntry)
+      }
+    } else {
+      // Load latest from history
+      const history = JSON.parse(localStorage.getItem('placement_analysis_history') || '[]')
+      if (history.length > 0) {
+        setAnalysisData(history[0])
+      } else {
+        navigate('/')
+      }
+    }
+  }, [location.state, navigate])
+
+  const toggleSection = (section: string) => {
+    setExpandedSections(prev => ({
+      ...prev,
+      [section]: !prev[section]
+    }))
+  }
+
+  const toggleSkillConfidence = (skill: string) => {
+    if (!analysisData) return
+    
+    const currentConfidence = analysisData.skillConfidenceMap[skill] || 'practice'
+    const newConfidence = currentConfidence === 'know' ? 'practice' : 'know'
+    
+    const updatedMap: Record<string, 'know' | 'practice'> = {
+      ...analysisData.skillConfidenceMap,
+      [skill]: newConfidence
+    }
+    
+    // Calculate new score
+    const knowSkills = Object.values(updatedMap).filter(v => v === 'know').length
+    const practiceSkills = Object.values(updatedMap).filter(v => v === 'practice').length
+    const newScore = Math.max(0, Math.min(100, analysisData.baseScore + (knowSkills * 2) - (practiceSkills * 2)))
+    
+    const updatedEntry = {
+      ...analysisData,
+      skillConfidenceMap: updatedMap,
+      finalScore: newScore
+    }
+    
+    setAnalysisData(updatedEntry)
+    updateAnalysis(analysisData.id, {
+      skillConfidenceMap: updatedMap,
+      finalScore: newScore
+    })
+  }
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text)
+  }
+
+  const downloadAsTxt = () => {
+    if (!analysisData) return
+    
+    const content = `
+KODNEST PLACEMENT READINESS ANALYSIS
+=====================================
+
+Company: ${analysisData.company || 'Not specified'}
+Role: ${analysisData.role || 'Not specified'}
+Date: ${new Date(analysisData.createdAt).toLocaleDateString()}
+
+READINESS SCORE: ${analysisData.finalScore}/100
+
+KEY SKILLS EXTRACTED:
+${Object.entries(analysisData.extractedSkills)
+  .filter(([_, skills]) => skills.length > 0)
+  .map(([category, skills]) => `${category}: ${skills.join(', ')}`)
+  .join('\n')}
+
+7-DAY PREPARATION PLAN:
+${analysisData.plan7Days.map(day => 
+  `${day.day} - ${day.focus}\n${day.tasks.map(task => `  • ${task}`).join('\n')}`
+).join('\n\n')}
+
+ROUND-WISE CHECKLIST:
+${analysisData.checklist.map(round => 
+  `${round.roundTitle}\n${round.items.map(item => `  • ${item}`).join('\n')}`
+).join('\n\n')}
+
+LIKELY INTERVIEW QUESTIONS:
+${analysisData.questions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
+
+Generated by KodNest Premium Build System
+`
+    
+    const blob = new Blob([content], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `placement-readiness-${analysisData.id}.txt`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  if (!analysisData) {
+    return (
+      <div className="p-8 flex items-center justify-center">
+        <div className="text-center">
+          <p className="text-gray-500">Loading analysis...</p>
+        </div>
+      </div>
+    )
+  }
+
+  const allSkills = Object.entries(analysisData.extractedSkills)
+    .filter(([_, skills]) => skills.length > 0)
+    .flatMap(([category, skills]) => skills)
+
+  const practiceSkills = allSkills.filter(skill => 
+    analysisData.skillConfidenceMap[skill] !== 'know'
+  ).slice(0, 3)
+
+  return (
+    <div className="p-8">
+      {/* Top Bar */}
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="text-2xl font-serif font-semibold">Analysis Results</h1>
+          <p className="text-gray-500">Step 2 / 4</p>
+        </div>
+        <div className="px-4 py-2 bg-green-100 text-green-700 rounded-full text-sm font-medium">
+          Analyzed
+        </div>
+      </div>
+
+      {/* Context Header */}
+      <div className="mb-10">
+        <h2 className="text-4xl font-serif font-bold mb-3">Your Placement Readiness Analysis</h2>
+        <p className="text-xl text-gray-600 max-w-3xl">
+          Based on the job description for {analysisData.role || 'the position'}, here's your personalized preparation roadmap.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-12">
+        {/* Primary Workspace */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Readiness Score */}
+          <div className="card">
+            <h3 className="text-2xl font-serif font-semibold mb-4">Readiness Score</h3>
+            <div className="flex items-center justify-center py-6">
+              <div className="relative w-32 h-32">
+                <svg className="w-full h-full" viewBox="0 0 100 100">
+                  <circle cx="50" cy="50" r="45" fill="none" stroke="#e5e7eb" strokeWidth="8" />
+                  <circle
+                    cx="50"
+                    cy="50"
+                    r="45"
+                    fill="none"
+                    stroke="#8B0000"
+                    strokeWidth="8"
+                    strokeDasharray={`${283 * (analysisData.finalScore / 100)} 283`}
+                    strokeLinecap="round"
+                    transform="rotate(-90 50 50)"
+                  />
+                </svg>
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                  <span className="text-2xl font-bold text-foreground">{analysisData.finalScore}</span>
+                  <span className="text-xs text-gray-500">/100</span>
+                </div>
+              </div>
+            </div>
+            <p className="text-center text-gray-600 mt-4">
+              Base score: {analysisData.baseScore} → Adjusted: {analysisData.finalScore}
+            </p>
+          </div>
+
+          {/* Key Skills Extracted */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-serif font-semibold">Key Skills Extracted</h3>
+              <button 
+                onClick={() => toggleSection('skills')}
+                className="text-gray-500 hover:text-foreground"
+              >
+                {expandedSections.skills ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+              </button>
+            </div>
+            
+            {expandedSections.skills && (
+              <div className="space-y-4">
+                {Object.entries(analysisData.extractedSkills).map(([category, skills]) => 
+                  skills.length > 0 && (
+                    <div key={category} className="border-b border-gray-100 pb-3 last:border-0">
+                      <h4 className="font-medium text-foreground mb-2 capitalize">{category}</h4>
+                      <div className="flex flex-wrap gap-2">
+                        {skills.map((skill: string) => (
+                          <button
+                            key={skill}
+                            onClick={() => toggleSkillConfidence(skill)}
+                            className={`px-3 py-1 rounded-full text-sm font-medium transition-all ${
+                              analysisData.skillConfidenceMap[skill] === 'know'
+                                ? 'bg-green-100 text-green-800 hover:bg-green-200'
+                                : 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200'
+                            }`}
+                          >
+                            {skill} {analysisData.skillConfidenceMap[skill] === 'know' ? '✓' : '?'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* 7-Day Plan */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-serif font-semibold">7-Day Preparation Plan</h3>
+              <div className="flex space-x-2">
+                <button 
+                  onClick={() => copyToClipboard(
+                    analysisData.plan7Days.map(day => 
+                      `${day.day} - ${day.focus}\n${day.tasks.map(t => `• ${t}`).join('\n')}`
+                    ).join('\n\n')
+                  )}
+                  className="text-gray-500 hover:text-foreground"
+                  title="Copy plan"
+                >
+                  <Copy size={18} />
+                </button>
+                <button 
+                  onClick={() => toggleSection('plan')}
+                  className="text-gray-500 hover:text-foreground"
+                >
+                  {expandedSections.plan ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                </button>
+              </div>
+            </div>
+            
+            {expandedSections.plan && (
+              <div className="space-y-4">
+                {analysisData.plan7Days.map((day, index) => (
+                  <div key={index} className="border-l-4 border-accent pl-4 py-2">
+                    <h4 className="font-semibold text-foreground">{day.day} - {day.focus}</h4>
+                    <ul className="mt-2 space-y-1">
+                      {day.tasks.map((task, taskIndex) => (
+                        <li key={taskIndex} className="text-gray-600 text-sm">• {task}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Round Checklist */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-serif font-semibold">Round-wise Preparation</h3>
+              <div className="flex space-x-2">
+                <button 
+                  onClick={() => copyToClipboard(
+                    analysisData.checklist.map(round => 
+                      `${round.roundTitle}\n${round.items.map(item => `• ${item}`).join('\n')}`
+                    ).join('\n\n')
+                  )}
+                  className="text-gray-500 hover:text-foreground"
+                  title="Copy checklist"
+                >
+                  <Copy size={18} />
+                </button>
+                <button 
+                  onClick={() => toggleSection('checklist')}
+                  className="text-gray-500 hover:text-foreground"
+                >
+                  {expandedSections.checklist ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                </button>
+              </div>
+            </div>
+            
+            {expandedSections.checklist && (
+              <div className="space-y-6">
+                {analysisData.checklist.map((round, index) => (
+                  <div key={index}>
+                    <h4 className="font-semibold text-foreground mb-3">{round.roundTitle}</h4>
+                    <ul className="space-y-2">
+                      {round.items.map((item, itemIndex) => (
+                        <li key={itemIndex} className="flex items-start">
+                          <span className="w-2 h-2 bg-accent rounded-full mt-2 mr-3 flex-shrink-0"></span>
+                          <span className="text-gray-700">{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Interview Questions */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-serif font-semibold">Likely Interview Questions</h3>
+              <div className="flex space-x-2">
+                <button 
+                  onClick={() => copyToClipboard(
+                    analysisData.questions.map((q, i) => `${i + 1}. ${q}`).join('\n')
+                  )}
+                  className="text-gray-500 hover:text-foreground"
+                  title="Copy questions"
+                >
+                  <Copy size={18} />
+                </button>
+                <button 
+                  onClick={() => toggleSection('questions')}
+                  className="text-gray-500 hover:text-foreground"
+                >
+                  {expandedSections.questions ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                </button>
+              </div>
+            </div>
+            
+            {expandedSections.questions && (
+              <div className="space-y-4">
+                {analysisData.questions.map((question, index) => (
+                  <div key={index} className="p-4 bg-gray-50 rounded-lg">
+                    <p className="text-foreground">{question}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Secondary Panel */}
+        <div className="space-y-6">
+          {/* Company Intel */}
+          {analysisData.companyIntel && (
+            <div className="card">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-serif font-semibold">Company Intel</h3>
+                <button 
+                  onClick={() => toggleSection('companyIntel')}
+                  className="text-gray-500 hover:text-foreground"
+                >
+                  {expandedSections.companyIntel ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                </button>
+              </div>
+              
+              {expandedSections.companyIntel && (
+                <div className="space-y-4">
+                  <div>
+                    <p className="text-sm text-gray-500">Company</p>
+                    <p className="font-medium text-foreground">{analysisData.companyIntel.name}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-500">Industry</p>
+                    <p className="font-medium text-foreground">{analysisData.companyIntel.industry}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-500">Size</p>
+                    <p className="font-medium text-foreground">{analysisData.companyIntel.size}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-500">Hiring Focus</p>
+                    <p className="text-sm text-gray-600">{analysisData.companyIntel.hiringFocus}</p>
+                  </div>
+                  <div className="p-3 bg-yellow-50 rounded-lg">
+                    <p className="text-xs text-yellow-700">
+                      Demo Mode: Company intel generated heuristically.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Export Tools */}
+          <div className="card">
+            <h3 className="text-xl font-serif font-semibold mb-4">Export Tools</h3>
+            <div className="space-y-3">
+              <button 
+                onClick={() => copyToClipboard(
+                  analysisData.plan7Days.map(day => 
+                    `${day.day} - ${day.focus}\n${day.tasks.map(t => `• ${t}`).join('\n')}`
+                  ).join('\n\n')
+                )}
+                className="w-full btn-secondary text-left"
+              >
+                Copy 7-day plan
+              </button>
+              <button 
+                onClick={() => copyToClipboard(
+                  analysisData.checklist.map(round => 
+                    `${round.roundTitle}\n${round.items.map(item => `• ${item}`).join('\n')}`
+                  ).join('\n\n')
+                )}
+                className="w-full btn-secondary text-left"
+              >
+                Copy round checklist
+              </button>
+              <button 
+                onClick={() => copyToClipboard(
+                  analysisData.questions.map((q, i) => `${i + 1}. ${q}`).join('\n')
+                )}
+                className="w-full btn-secondary text-left"
+              >
+                Copy 10 questions
+              </button>
+              <button 
+                onClick={downloadAsTxt}
+                className="w-full btn-primary flex items-center justify-center space-x-2"
+              >
+                <Download size={18} />
+                <span>Download as TXT</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Action Next */}
+          <div className="card bg-accent bg-opacity-5 border-accent border">
+            <h3 className="text-xl font-serif font-semibold mb-4 text-accent">Action Next</h3>
+            {practiceSkills.length > 0 ? (
+              <div className="space-y-3">
+                <p className="text-foreground">Focus on these areas:</p>
+                <ul className="space-y-2">
+                  {practiceSkills.map((skill, index) => (
+                    <li key={index} className="flex items-center space-x-2">
+                      <span className="w-2 h-2 bg-accent rounded-full"></span>
+                      <span className="text-gray-700">{skill}</span>
+                    </li>
+                  ))}
+                </ul>
+                <button className="w-full btn-primary mt-4">
+                  Start Day 1 plan now
+                </button>
+              </div>
+            ) : (
+              <p className="text-gray-600">You're well prepared! Review your plan and start practicing.</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Proof Footer */}
+      <div className="border-t border-gray-200 pt-8">
+        <h3 className="text-lg font-serif font-semibold mb-4">Progress Checklist</h3>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          {['UI Built', 'Logic Working', 'Test Passed', 'Deployed'].map((item, index) => (
+            <div key={index} className="flex items-center space-x-3 p-4 bg-white border border-gray-200 rounded-lg">
+              <div className="w-5 h-5 border-2 border-gray-300 rounded flex items-center justify-center">
+                <span className="text-xs text-transparent">✓</span>
+              </div>
+              <span className="text-gray-700">{item}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
